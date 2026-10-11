@@ -22,6 +22,72 @@ window.__ModuleLoader__.load({
       return newGame(board);
     }
 
+    // ---------- AI（negamax + αβ剪枝，难度=搜索深度，纯本地无模型调用） ----------
+    const PIECE_VAL = { p: 100, n: 320, b: 330, r: 500, q: 900, k: 20000 };
+    function posBonus(type, color, r, c) {
+      const center = 6 - (Math.abs(c - 3.5) + Math.abs(r - 3.5));
+      let v = center * 2;
+      if (type === 'p') v += (color === 'w' ? (6 - r) : (r - 1)) * 6;
+      return v;
+    }
+    function evaluateBoard(b) { // 白方视角
+      let score = 0;
+      for (let r = 0; r < SIZE; r++) for (let c = 0; c < SIZE; c++) {
+        const p = b[r][c];
+        if (!p) continue;
+        const v = PIECE_VAL[p.type] + posBonus(p.type, p.color, r, c);
+        score += p.color === 'w' ? v : -v;
+      }
+      return score;
+    }
+    function orderMoves(moves, b) {
+      return moves.map(m => {
+        const t = b[m.to.r][m.to.c];
+        return { m, s: (t ? PIECE_VAL[t.type] * 10 - PIECE_VAL[m.piece] : 0) + (m.promotion === 'q' ? 800 : 0) };
+      }).sort((a, z) => z.s - a.s).map(x => x.m);
+    }
+    // 搜索内不更新易位权（轻微不精确，可接受）；过路兵目标格正确传递
+    function negamax(b, color, castling, ep, depth, alpha, beta) {
+      const moves = legalMoves(b, color, castling, ep);
+      if (!moves.length) return inCheck(b, color) ? -99000 - depth * 10 : 0;
+      if (depth === 0) return (color === 'w' ? 1 : -1) * evaluateBoard(b);
+      let best = -Infinity;
+      for (const m of orderMoves(moves, b)) {
+        const nb = applyMoveToBoard(b, m, color);
+        const nep = (m.flags || []).includes('double') ? { r: (m.from.r + m.to.r) / 2, c: m.from.c } : null;
+        const v = -negamax(nb, color === 'w' ? 'b' : 'w', castling, nep, depth - 1, -beta, -alpha);
+        if (v > best) best = v;
+        if (v > alpha) alpha = v;
+        if (alpha >= beta) break;
+      }
+      return best;
+    }
+    function pickAiMove(s, level) {
+      const moves = legalMoves(s.board, s.turn, s.castling, s.epSquare);
+      if (!moves.length) return null;
+      if (level <= 1 && Math.random() < 0.5) return moves[Math.floor(Math.random() * moves.length)];
+      const depth = Math.max(1, Math.min(level, 5));
+      const opp = s.turn === 'w' ? 'b' : 'w';
+      const scored = orderMoves(moves, s.board).map(m => {
+        const nb = applyMoveToBoard(s.board, m, s.turn);
+        const nep = (m.flags || []).includes('double') ? { r: (m.from.r + m.to.r) / 2, c: m.from.c } : null;
+        return { m, v: -negamax(nb, opp, s.castling, nep, depth - 1, -Infinity, Infinity) };
+      });
+      scored.sort((a, z) => z.v - a.v);
+      // 低难度在近似最优走法中随机（制造失误空间）
+      const windowCp = level <= 1 ? 220 : level === 2 ? 90 : level === 3 ? 30 : 0;
+      const top = scored.filter(x => x.v >= scored[0].v - windowCp);
+      return top[Math.floor(Math.random() * top.length)].m;
+    }
+    function aiTurn(s) { // AI 执子：返回走完的新 state；不该 AI 走时原样返回
+      if (!isAiMode(s.mode) || s.gameOver || s.pendingPromo) return s;
+      if (s.turn !== aiColorOf(s.mode)) return s;
+      const m = pickAiMove(s, s.aiLevel);
+      return m ? doMove(s, m) : s;
+    }
+    function isAiMode(mode) { return mode === 'ai-w' || mode === 'ai-b'; }
+    function aiColorOf(mode) { return mode === 'ai-w' ? 'b' : 'w'; }
+
     function newGame(board) {
       return {
         board,
@@ -36,7 +102,14 @@ window.__ModuleLoader__.load({
         gameOver: false,
         resultText: '',
         pendingPromo: null,
+        mode: 'pvp',
+        aiLevel: 3,
       };
+    }
+    function startGame(mode, aiLevel) {
+      const s = initialSetup();
+      s.mode = mode; s.aiLevel = aiLevel;
+      return s;
     }
 
     function sqName(r, c) { return FILES[c] + (SIZE - r); }
@@ -464,6 +537,11 @@ window.__ModuleLoader__.load({
 .cfw-sq.light .cfw-coord { color: #8a6b47; }
 .cfw-sq.dark .cfw-coord { color: #f0d9b5; }
 .cfw-controls { display: flex; gap: 8px; }
+.cfw-setup { display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--dsw-alias-label-secondary); }
+.cfw-setup label { display: flex; gap: 5px; align-items: center; }
+.cfw-sel { font-size: 13px; padding: 4px 8px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2);
+  color: var(--dsw-alias-label-primary); }
 .cfw-btn { font-size: 13px; padding: 5px 14px; border-radius: 6px; cursor: pointer;
   border: 1px solid var(--dsw-alias-border-l2); background: var(--dsw-alias-bg-layer-2);
   color: var(--dsw-alias-label-primary); }
@@ -528,6 +606,17 @@ window.__ModuleLoader__.load({
         y: Math.max(12, Math.round(window.innerHeight * 0.18)),
       }));
       const dragRef = React.useRef(null);
+      const [thinking, setThinking] = React.useState(false);
+
+      // AI 执子调度：轮到 AI 时让浏览器先渲染"思考中"，再异步走子
+      React.useEffect(() => {
+        if (!open) return;
+        if (!isAiMode(game.mode) || game.gameOver || game.pendingPromo) return;
+        if (game.turn !== aiColorOf(game.mode)) return;
+        setThinking(true);
+        const t = setTimeout(() => { setGame(g => aiTurn(g)); setThinking(false); }, 160);
+        return () => { clearTimeout(t); };
+      }, [game, open]);
 
       const onPointerDown = (e) => {
         if (e.target.closest('.cfw-close')) return;
@@ -559,7 +648,7 @@ window.__ModuleLoader__.load({
         squares.push(h('div', {
           key: r + '-' + c, className: cls.join(' '),
           style: { gridRow: r + 1, gridColumn: c + 1 },
-          onClick: () => setGame(g => onSquareClick(g, r, c)),
+          onClick: () => setGame(g => (isAiMode(g.mode) && g.turn === aiColorOf(g.mode)) ? g : onSquareClick(g, r, c)),
         },
           mv ? h('span', { className: 'cfw-hint' + ((p || (mv.flags || []).includes('ep')) ? ' capture' : '') }) : null,
           p ? h('span', { className: 'cfw-piece ' + p.color }, GLYPH[p.color][p.type]) : null,
@@ -585,11 +674,32 @@ window.__ModuleLoader__.load({
           h('button', { type: 'button', className: 'cfw-close', title: '关闭', onClick: () => set(false) }, '✕'),
         ),
         h('div', { className: 'cfw-body' },
+          h('div', { className: 'cfw-setup' },
+            h('label', null, '模式',
+              h('select', {
+                className: 'cfw-sel', value: s.mode,
+                onChange: e => setGame(g => startGame(e.target.value, g.aiLevel)),
+              },
+                h('option', { value: 'pvp' }, '双人对战'),
+                h('option', { value: 'ai-w' }, '人机 · 我执白'),
+                h('option', { value: 'ai-b' }, '人机 · 我执黑'),
+              )),
+            isAiMode(s.mode) ? h('label', null, '难度',
+              h('select', {
+                className: 'cfw-sel', value: String(s.aiLevel),
+                onChange: e => setGame(g => ({ ...g, aiLevel: Number(e.target.value) })),
+              },
+                ['入门', '简单', '中等', '困难', '大师'].map((n, i) =>
+                  h('option', { key: i + 1, value: String(i + 1) }, `${n}（${i + 1}）`)))) : null,
+          ),
           h('div', { className: 'cfw-status' },
             s.gameOver ? s.resultText
               : h(React.Fragment, null,
                 h('span', { className: 'cfw-dot', style: { background: s.turn === 'w' ? '#fff' : '#111' } }),
-                statusText(s)),
+                thinking ? '🤔 AI 思考中…'
+                  : isAiMode(s.mode)
+                    ? (s.turn === aiColorOf(s.mode) ? '轮到 AI 走棋' : `轮到你走棋（${s.turn === 'w' ? '白方' : '黑方'}）`)
+                    : statusText(s)),
           ),
           s.pendingPromo ? h('div', { className: 'cfw-promo' },
             h('span', null, '兵的升变 — 选择：'),
@@ -600,8 +710,16 @@ window.__ModuleLoader__.load({
           ) : null,
           h('div', { className: 'cfw-board' }, squares),
           h('div', { className: 'cfw-controls' },
-            h('button', { type: 'button', className: 'cfw-btn', onClick: () => setGame(undo) }, '↩ 悔棋'),
-            h('button', { type: 'button', className: 'cfw-btn', onClick: () => setGame(initialSetup) }, '⊕ 新对局'),
+            h('button', {
+              type: 'button', className: 'cfw-btn',
+              onClick: () => setGame(g => {
+                let s = undo(g);
+                // 人机模式悔到轮人为止（通常两步）
+                if (isAiMode(s.mode) && s.history.length && s.turn === aiColorOf(s.mode)) s = undo(s);
+                return s;
+              }),
+            }, '↩ 悔棋'),
+            h('button', { type: 'button', className: 'cfw-btn', onClick: () => setGame(g => startGame(g.mode, g.aiLevel)) }, '⊕ 新对局'),
             h('button', {
               type: 'button', className: 'cfw-btn',
               title: s.history.length ? '下载 PGN 棋谱文件' : '还没有着法可保存',
