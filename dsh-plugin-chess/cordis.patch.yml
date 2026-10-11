@@ -1,0 +1,3 @@
+- insert:
+    - id: chess-float
+      name: '@local/chess-float'
