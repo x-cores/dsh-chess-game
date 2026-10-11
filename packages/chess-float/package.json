@@ -1,7 +1,13 @@
 {
-  "name": "@local/chess-float",
-  "version": "1.0.0",
+  "name": "dsh-chess-float",
+  "version": "1.1.0",
   "private": true,
+  "description": "Two-player chess in a draggable floating window with full rules and PGN export.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/x-cores/dsh-chess-game.git",
+    "directory": "packages/chess-float"
+  },
   "type": "module",
   "exports": { ".": "./index.js", "./client": "./client.js" },
   "dsh": {
